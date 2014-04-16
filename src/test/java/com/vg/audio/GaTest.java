@@ -1,28 +1,22 @@
 package com.vg.audio;
 
-import static org.junit.Assert.*;
 import gnu.trove.list.array.TFloatArrayList;
 
 import java.awt.image.BufferedImage;
-import java.awt.image.DataBuffer;
 import java.awt.image.DataBufferByte;
 import java.awt.image.DataBufferUShort;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.RandomAccessFile;
-import java.lang.ProcessBuilder.Redirect;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -32,11 +26,8 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Map;
-import java.util.RandomAccess;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Executors;
@@ -44,9 +35,7 @@ import java.util.concurrent.Future;
 
 import javax.imageio.ImageIO;
 
-import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.filefilter.FileFilterUtils;
-import org.apache.commons.lang3.tuple.Pair;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -142,67 +131,6 @@ public class GaTest {
         return signal.array();
     }
 
-    static class AudioFile {
-        int sampleRate;
-        float[] signal;
-        public File file;
-    }
-
-    static AudioFile sox(File f) throws IOException, InterruptedException {
-        //soxi
-        ProcessBuilder pbi = new ProcessBuilder("soxi", f.getAbsolutePath());
-        pbi.redirectError(Redirect.INHERIT);
-        Process soxi = pbi.start();
-        soxi.getOutputStream().close();
-        List<String> readLines = IOUtils.readLines(soxi.getInputStream());
-        int exitCodei = soxi.waitFor();
-        Assert.assertEquals(0, exitCodei);
-
-        Map<String, String> map = new LinkedHashMap<String, String>();
-        for (String string : readLines) {
-            String[] split = string.split(":", 2);
-            if (split.length == 2) {
-                map.put(split[0].trim(), split[1].trim());
-            }
-        }
-        AudioFile af = new AudioFile();
-        af.file = f;
-        af.sampleRate = Integer.parseInt(map.get("Sample Rate"));
-
-        //sox 0442.mp3 -e signed -b 16 -t raw -
-        ProcessBuilder pb = new ProcessBuilder("sox", f.getAbsolutePath(), "-e", "signed", "-b", "16", "-t", "raw", "-");
-        pb.redirectError(Redirect.INHERIT);
-        Process sox = pb.start();
-        sox.getOutputStream().close();
-        InputStream inputStream = sox.getInputStream();
-        byte[] byteArray = IOUtils.toByteArray(inputStream);
-        int exitCode = sox.waitFor();
-        Assert.assertEquals(0, exitCode);
-
-        ByteBuffer buf = ByteBuffer.wrap(byteArray);
-        FloatBuffer signal = FloatBuffer.allocate(buf.capacity() / 2);
-        buf.order(ByteOrder.LITTLE_ENDIAN);
-        buf.clear();
-        ShortBuffer asShortBuffer = buf.asShortBuffer();
-        float r32767 = 1f / 32767f;
-        float min = Float.MAX_VALUE;
-        float max = Float.MIN_VALUE;
-        while (asShortBuffer.hasRemaining()) {
-            short s = asShortBuffer.get();
-            float smp = s * r32767;
-            min = Math.min(min, smp);
-            max = Math.max(max, smp);
-            signal.put(smp);
-        }
-        System.out.println(min + " " + max);
-
-        Assert.assertFalse(signal.hasRemaining());
-        signal.clear();
-        af.signal = signal.array();
-
-        return af;
-    }
-
     static byte[] index(float[] signal) {
         JTransformsFFT fft = new JTransformsFFT(signal.length);
         float[] spectrum = fft.spectrum(signal);
@@ -260,7 +188,7 @@ public class GaTest {
             float[] spectrum = fft.spectrum(window);
             for (int i = 0; i < spectrum.length; i++) {
                 int hz = (int) (i * r);
-                int binIdx = hz2bin[hz];
+                int binIdx = Idx.hz2bin[hz];
                 float magnitude = spectrum[i];
                 //                System.out.println(hz + " " + (int) magnitude);
                 if (magnitudes[binIdx] < magnitude) {
@@ -273,177 +201,26 @@ public class GaTest {
         return frequencies;
     }
 
-    static Idx index3(AudioFile sox) {
-        int sampleRate = sox.sampleRate;
-        int windowSize = Math.min(sampleRate, sox.signal.length);
-        JTransformsFFT fft = new JTransformsFFT(windowSize);
-        FloatBuffer Signal = FloatBuffer.wrap(sox.signal);
-        float[] window = new float[windowSize];
-        int frequencies[] = new int[25];
-        float magnitudes[] = new float[25];
-        int spectrumSize = (windowSize / 2);
-        int maxHz = (sampleRate / 2);
-        float r = (float) maxHz / (float) spectrumSize;
-
-        while (Signal.remaining() >= windowSize) {
-            Signal.get(window);
-            float[] spectrum = fft.spectrum(window);
-            for (int i = 0; i < spectrum.length; i++) {
-                int hz = (int) (i * r);
-                int binIdx = hz2bin[hz];
-                float magnitude = spectrum[i];
-                //                System.out.println(hz + " " + (int) magnitude);
-                if (magnitudes[binIdx] < magnitude) {
-                    magnitudes[binIdx] = magnitude;
-                    frequencies[binIdx] = hz;
-                }
-            }
-        }
-
-        float[] normalizedMagnitudes = normalize(magnitudes);
-
-        Idx idx = new Idx();
-        idx.sampleRate = sox.sampleRate;
-        idx.file = sox.file;
-        idx.index2 = frequencies;
-        idx.magnitudes = normalizedMagnitudes;
-
-        return idx;
-    }
-
-    private static float[] normalize(float[] magnitudes) {
-        float max = maxArray(magnitudes);
-        max *= 0.8f;
-        float r = 1f / max;
-        float[] normalized = new float[magnitudes.length];
-        for (int i = 0; i < magnitudes.length; i++) {
-            normalized[i] = Math.min(1f, magnitudes[i] * r);
-        }
-        return normalized;
-    }
-
     @Test
     public void testNormalize() throws Exception {
         float[] a = new float[] { 1, 2, 3, 4 };
-        String gsonToString = GsonFactory.gsonToString(normalize(a));
+        String gsonToString = GsonFactory.gsonToString(Idx.normalize(a));
         System.out.println(gsonToString);
-    }
-
-    static float maxArray(float[] array) {
-        float max = Float.MIN_VALUE;
-        for (int i = 0; i < array.length; i++) {
-            max = Math.max(max, array[i]);
-        }
-        return max;
     }
 
     @Test
     public void test440() throws Exception {
         File f2 = new File("/Users/zhukov/git/tle-1.3x/test-data/wav/440880.wav");
         File f = new File("/Users/zhukov/Downloads/sine 1k 0.5s.wav");
-        AudioFile sox = sox(f);
+        AudioFile sox = AudioFile.sox(f);
         int[] index2 = index2(sox);
-    }
-
-    private final static int[] hz2bin = new int[24000];
-    private final static float[] binWeights = new float[] { 1f, 1f, 1f, 1f, 100f / 110f, 100f / 120f, 100f / 140f,
-            100f / 150f, 100f / 160f, 100f / 190f, 100f / 210f, 100f / 240f, 100f / 280f, 100f / 320f, 100f / 380f,
-            100f / 450f, 100 / 550f, 100f / 700f, 100f / 900f, 100f / 1100f, 100f / 1300f, 100f / 1800f, 100f / 2500f,
-            100f / 3500f, 100f / (24000f - 15500f) };
-    private final static int[] binSizes = new int[] { 100, 100, 100, 100, 110, 120, 140, 150, 160, 190, 210, 240, 280,
-            320, 380, 450, 550, 700, 900, 1100, 1300, 1800, 2500, 3500, (hz2bin.length - 15500) };
-    static {
-        for (int hz = 0; hz < 100; hz++) {
-            hz2bin[hz] = 0;
-        }
-        for (int hz = 100; hz < 200; hz++) {
-            hz2bin[hz] = 1;
-        }
-        for (int hz = 200; hz < 300; hz++) {
-            hz2bin[hz] = 2;
-        }
-        for (int hz = 300; hz < 400; hz++) {
-            hz2bin[hz] = 3;
-        }
-
-        for (int hz = 400; hz < 510; hz++) {
-            hz2bin[hz] = 4;
-        }
-
-        for (int hz = 510; hz < 630; hz++) {
-            hz2bin[hz] = 5;
-        }
-
-        for (int hz = 630; hz < 770; hz++) {
-            hz2bin[hz] = 6;
-        }
-
-        for (int hz = 770; hz < 920; hz++) {
-            hz2bin[hz] = 7;
-        }
-
-        for (int hz = 920; hz < 1080; hz++) {
-            hz2bin[hz] = 8;
-        }
-        for (int hz = 1080; hz < 1270; hz++) {
-            hz2bin[hz] = 9;
-        }
-        for (int hz = 1270; hz < 1480; hz++) {
-            hz2bin[hz] = 10;
-        }
-        for (int hz = 1480; hz < 1720; hz++) {
-            hz2bin[hz] = 11;
-        }
-        for (int hz = 1720; hz < 2000; hz++) {
-            hz2bin[hz] = 12;
-        }
-        for (int hz = 2000; hz < 2320; hz++) {
-            hz2bin[hz] = 13;
-        }
-        for (int hz = 2320; hz < 2700; hz++) {
-            hz2bin[hz] = 14;
-        }
-        for (int hz = 2700; hz < 3150; hz++) {
-            hz2bin[hz] = 15;
-        }
-        for (int hz = 3150; hz < 3700; hz++) {
-            hz2bin[hz] = 16;
-        }
-        for (int hz = 3700; hz < 4400; hz++) {
-            hz2bin[hz] = 17;
-        }
-        for (int hz = 4400; hz < 5300; hz++) {
-            hz2bin[hz] = 18;
-        }
-        for (int hz = 5300; hz < 6400; hz++) {
-            hz2bin[hz] = 19;
-        }
-        for (int hz = 6400; hz < 7700; hz++) {
-            hz2bin[hz] = 20;
-        }
-        for (int hz = 7700; hz < 9500; hz++) {
-            hz2bin[hz] = 21;
-        }
-        for (int hz = 9500; hz < 12000; hz++) {
-            hz2bin[hz] = 22;
-        }
-        for (int hz = 9500; hz < 12000; hz++) {
-            hz2bin[hz] = 22;
-        }
-        for (int hz = 12000; hz < 15500; hz++) {
-            hz2bin[hz] = 23;
-        }
-        for (int hz = 15500; hz < hz2bin.length; hz++) {
-            hz2bin[hz] = 24;
-        }
-
     }
 
     @Test
     public void testOleg() throws Exception {
         //        File mp3442 = new File("/Users/zhukov/testdata/philarmonia samples/contrabassoon/0442.mp3");
         File mp3442 = new File("/Users/zhukov/testdata/oleg_voice.wav");
-        AudioFile signal = sox(mp3442);
+        AudioFile signal = AudioFile.sox(mp3442);
         JTransformsFFT fft = new JTransformsFFT(44100);
         FloatBuffer Signal = FloatBuffer.wrap(signal.signal);
         float[] window = new float[44100];
@@ -469,7 +246,7 @@ public class GaTest {
         float magnitudes[] = new float[25];
         for (int i = 0; i < maxSpectrum.length; i++) {
             int hz = i;
-            int binIdx = hz2bin[hz];
+            int binIdx = Idx.hz2bin[hz];
             float magnitude = maxSpectrum[i];
             if (magnitudes[binIdx] < magnitude) {
                 magnitudes[binIdx] = magnitude;
@@ -487,7 +264,7 @@ public class GaTest {
     public void testOlegBins() throws Exception {
         //        File mp3442 = new File("/Users/zhukov/testdata/philarmonia samples/contrabassoon/0442.mp3");
         File mp3442 = new File("/Users/zhukov/testdata/oleg_voice.wav");
-        AudioFile signal = sox(mp3442);
+        AudioFile signal = AudioFile.sox(mp3442);
         JTransformsFFT fft = new JTransformsFFT(44100);
         FloatBuffer Signal = FloatBuffer.wrap(signal.signal);
         float[] window = new float[44100];
@@ -508,7 +285,7 @@ public class GaTest {
         float magnitudes[] = new float[25];
         for (int i = 0; i < maxSpectrum.length; i++) {
             int hz = i;
-            int binIdx = hz2bin[hz];
+            int binIdx = Idx.hz2bin[hz];
             float magnitude = maxSpectrum[i];
             if (magnitudes[binIdx] < magnitude) {
                 magnitudes[binIdx] = magnitude;
@@ -535,7 +312,7 @@ public class GaTest {
         //        float[] signal = readFloatSignal(new File("/Users/zhukov/testdata/philarmonia samples/contrabassoon/0442.raw"));
         //        float[] signal = readWav(ec10);
         //        float[] signal = readRaw(raw442);
-        AudioFile signal = sox(mp3442);
+        AudioFile signal = AudioFile.sox(mp3442);
         JTransformsFFT fft = new JTransformsFFT(signal.signal.length);
         float[] spectrum = fft.spectrum(signal.signal);
         System.out.println(spectrum.length);
@@ -586,7 +363,7 @@ public class GaTest {
         List<Idx> indexes = new ArrayList<Idx>();
         for (File file : find) {
             System.out.println(file);
-            byte[] index = index(sox(file).signal);
+            byte[] index = index(AudioFile.sox(file).signal);
             Idx idx = new Idx();
             idx.file = file;
             idx.index = index;
@@ -595,7 +372,7 @@ public class GaTest {
         }
 
         File file = new File("/Users/zhukov/Downloads/search term 1.aif");
-        byte[] index = index(sox(file).signal);
+        byte[] index = index(AudioFile.sox(file).signal);
         ObjectOutputStream out = new ObjectOutputStream(new BufferedOutputStream(new FileOutputStream(new File(
                 "index.dat"))));
         out.writeObject(indexes);
@@ -623,7 +400,7 @@ public class GaTest {
                 public Idx call() throws Exception {
                     try {
                         System.out.println(file);
-                        AudioFile sox = sox(file);
+                        AudioFile sox = AudioFile.sox(file);
                         int[] index = index2(sox);
                         Idx idx = new Idx();
                         idx.sampleRate = sox.sampleRate;
@@ -658,8 +435,8 @@ public class GaTest {
     @Test
     public void testIndex3_239() throws Exception {
         File file = new File("/Users/zhukov/testdata/philarmonia samples/trumpet/239.mp3");
-        AudioFile sox = sox(file);
-        Idx idx = index3(sox);
+        AudioFile sox = AudioFile.sox(file);
+        Idx idx = Idx.index3(sox);
         for (int i = 0; i < idx.index2.length; i++) {
             System.out.println(idx.index2[i] + "hz " + idx.magnitudes[i]);
         }
@@ -676,8 +453,8 @@ public class GaTest {
                 public Idx call() throws Exception {
                     try {
                         System.out.println(file);
-                        AudioFile sox = sox(file);
-                        Idx idx = index3(sox);
+                        AudioFile sox = AudioFile.sox(file);
+                        Idx idx = Idx.index3(sox);
                         return idx;
                     } catch (Exception e) {
                         e.printStackTrace();
@@ -712,7 +489,7 @@ public class GaTest {
         System.out.println(indexes.size());
         File file = new File("/Users/zhukov/Downloads/search term 1.aif");
 
-        int[] index2 = index2(sox(file));
+        int[] index2 = index2(AudioFile.sox(file));
 
         for (Idx idx : indexes) {
             int[] index22 = idx.index2;
@@ -722,7 +499,7 @@ public class GaTest {
                 int f1 = index22[bin];
                 if (f0 > 0 && f1 > 0) {
                     float diff = Math.abs(f1 - f0);
-                    float weight = binWeights[bin];
+                    float weight = Idx.binWeights[bin];
                     diff *= weight;
                     sad += diff;
                 } else {
@@ -748,7 +525,7 @@ public class GaTest {
 //        File file = new File("/Users/zhukov/Downloads/search term 1.aif");
         File file = new File("/Users/zhukov/Downloads/gagaga.wav");
 
-        Idx search = index3(sox(file));
+        Idx search = Idx.index3(AudioFile.sox(file));
 
         for (Idx idx : indexes) {
             float sad = 0;
@@ -760,8 +537,8 @@ public class GaTest {
                 if (f0 > 0 && f1 > 0) {
                     float mdiff = Math.abs(m1 - m0);
                     float diff = Math.abs(f1 - f0);
-                    float weight = binWeights[bin];
-                    diff += mdiff * binSizes[bin];
+                    float weight = Idx.binWeights[bin];
+                    diff += mdiff * Idx.binSizes[bin];
                     diff *= weight;
                     sad += diff;
                 } else {
